@@ -17,7 +17,7 @@ const defaultInterval = time.Minute * 30
 
 // Check has a responsibility to detect out-of-date images
 type Check interface {
-	Run(ctx context.Context, imageChan chan<- *types.ImageSummary) error
+	Run(ctx context.Context, imageChan chan<- *types.ImageInspect) error
 }
 
 type check struct {
@@ -28,7 +28,7 @@ type check struct {
 	containers map[string]*types.Container
 }
 
-func (c *check) check(ctx context.Context, imageChan chan<- *types.ImageSummary) error {
+func (c *check) check(ctx context.Context, imageChan chan<- *types.ImageInspect) error {
 	log.Println("Check: Checking for image updates...")
 
 	if err := c.refreshContainers(); err != nil {
@@ -42,7 +42,7 @@ func (c *check) check(ctx context.Context, imageChan chan<- *types.ImageSummary)
 	return nil
 }
 
-func (c *check) Run(ctx context.Context, imageChan chan<- *types.ImageSummary) error {
+func (c *check) Run(ctx context.Context, imageChan chan<- *types.ImageInspect) error {
 	if err := c.check(ctx, imageChan); err != nil {
 		return err
 	}
@@ -75,7 +75,7 @@ func (c *check) refreshContainers() error {
 	return nil
 }
 
-func (c *check) checkImageUpdates(ctx context.Context, imageChan chan<- *types.ImageSummary) error {
+func (c *check) checkImageUpdates(ctx context.Context, imageChan chan<- *types.ImageInspect) error {
 	images, err := c.Docker.ImageList(ctx, types.ImageListOptions{All: false})
 	if err != nil {
 		return fmt.Errorf("failed to list images: %v", err)
@@ -122,16 +122,15 @@ func (c *check) checkImageUpdates(ctx context.Context, imageChan chan<- *types.I
 		}
 
 		// Get local image digest
-		imageInfo, _, err := c.Docker.ImageInspectWithRaw(context.Background(), image.ID)
+		imageInspect, _, err := c.Docker.ImageInspectWithRaw(context.Background(), image.ID)
 		if err != nil {
 			log.Printf("Check: Failed to get local digest: %v", err)
 			continue
 		}
 
 		found := false
-		for _, localDigest := range imageInfo.RepoDigests {
+		for _, localDigest := range imageInspect.RepoDigests {
 			localDigest = strings.Split(localDigest, ":")[1]
-			log.Printf("local digest %s ||| remote %s", localDigest, remoteDigest)
 			if localDigest == remoteDigest {
 				found = true
 				break
@@ -140,7 +139,7 @@ func (c *check) checkImageUpdates(ctx context.Context, imageChan chan<- *types.I
 
 		if !found {
 			log.Printf("Check: Queuing image %s:%s for upgrade", name, tag)
-			imageChan <- &image
+			imageChan <- &imageInspect
 		}
 	}
 

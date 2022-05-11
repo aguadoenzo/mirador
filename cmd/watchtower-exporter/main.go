@@ -7,6 +7,7 @@ import (
 	"os/signal"
 
 	"watchtower-exporter/internal/check"
+	"watchtower-exporter/internal/pull"
 	"watchtower-exporter/internal/registry"
 
 	"github.com/docker/docker/api/types"
@@ -30,14 +31,21 @@ func main() {
 
 	reg := registry.New()
 	checkMgr := check.New(reg, docker)
+	pullMgr := pull.New(docker)
 
 	errChan := make(chan error, 10)
-	imagesToUpdate := make(chan *types.ImageSummary, 100)
+	imagesToUpdate := make(chan *types.ImageInspect, 100)
 
 	log.Println("Main: Starting managers")
 
 	go func() {
 		if err := checkMgr.Run(ctx, imagesToUpdate); err != nil {
+			errChan <- err
+		}
+	}()
+
+	go func() {
+		if err := pullMgr.Run(ctx, imagesToUpdate); err != nil {
 			errChan <- err
 		}
 	}()
