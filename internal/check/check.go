@@ -82,15 +82,25 @@ func (c *check) checkImageUpdates(ctx context.Context, imageChan chan<- *types.I
 	}
 
 	for _, container := range c.containers {
-		log.Println("checking container", container.Image)
-
 		// Find the image relating to the container
 		var image types.ImageSummary
 		for _, i := range images {
+			if len(i.RepoTags) == 0 {
+				// Ignore untagged images
+				continue
+			}
 			if i.ID == container.ImageID {
 				image = i
 			}
 		}
+
+		// If no image is found, it's likely that the image is updated (and thus the previous one
+		// untagged), but the container hasn't been updated and is still pointing to the old image
+		if len(image.ID) == 0 {
+			log.Printf("Check: Container %s does not have a matching image", container.ID[0:10])
+			continue
+		}
+
 		imageRef := strings.Split(image.RepoTags[0], ":")
 		if len(imageRef) != 2 {
 			log.Printf("Check: Invalid image reference: %v", imageRef)
