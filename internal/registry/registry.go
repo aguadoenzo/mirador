@@ -13,9 +13,11 @@ import (
 
 type Registry interface {
 	// Digest returns the digest associated with a docker image and tag (aka the image hash)
-	Digest(ctx context.Context, image string, tag string, authToken string) (string, error)
+	Digest(ctx context.Context, image, tag, authToken string) (string, error)
 }
 
+// ContentDigestHeader is the key for the key-value pair containing the digest header
+const ContentDigestHeader = "Docker-Content-Digest"
 const dockerHubUrl = "https://index.docker.io/v2"
 
 type registryImpl struct {
@@ -25,7 +27,6 @@ type registryImpl struct {
 // authenticate returns an authentication token for a given service and scope
 func (r *registryImpl) authenticate(ctx context.Context, realm string, service string, scope string) (string, error) {
 	uri := fmt.Sprintf("%s?service=%s&scope=%s", realm, service, scope)
-	log.Printf("Attemptenting authentication at %s", uri)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, uri, nil)
 	if err != nil {
 		return "", fmt.Errorf("failed to create request: %v", err)
@@ -50,15 +51,16 @@ func (r *registryImpl) authenticate(ctx context.Context, realm string, service s
 
 // Digest returns the digest associated with a docker image and a tag
 // If authToken is empty and the request fails because of a 401 error, an authentication attempt will be performed
-func (r *registryImpl) Digest(ctx context.Context, image string, tag string, authToken string) (string, error) {
+func (r *registryImpl) Digest(ctx context.Context, image, tag, authToken string) (string, error) {
 	uri := fmt.Sprintf("%s/%s/manifests/%s", dockerHubUrl, image, tag)
 	req, err := http.NewRequestWithContext(ctx, http.MethodHead, uri, nil)
 	if err != nil {
 		return "", fmt.Errorf("failed to create request: %v", err)
 	}
 
-	// https://github.com/distribution/distribution/blob/c8d8e7e357a1e5cf39aec1cfd4b3aef82414b3fc/docs/spec/manifest-v2-2.md
-	req.Header.Set("Accept", "application/vnd.docker.distribution.manifest.v2+json")
+	// Running "docker images --digests" return the fat manifest digest of an image
+	req.Header.Add("Accept", "application/vnd.docker.distribution.manifest.list.v2+json")
+
 	if len(authToken) > 0 {
 		req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", authToken))
 	}
@@ -103,14 +105,16 @@ func (r *registryImpl) Digest(ctx context.Context, image string, tag string, aut
 
 		log.Println("Registry: Initial request failed, attempting authentication")
 		return r.Digest(ctx, image, tag, token)
+	} else if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("request failed with code %d", resp.StatusCode)
 	}
 
-	digest := resp.Header.Get("docker-content-digest")
+	digest := resp.Header.Get(ContentDigestHeader)
 	if len(digest) == 0 {
-		return "", errors.New("empty digest")
+		return "", errors.New("empty digest header")
 	}
 
-	return digest, nil
+	return strings.TrimPrefix(digest, "sha256:"), nil
 }
 
 func New() Registry {
