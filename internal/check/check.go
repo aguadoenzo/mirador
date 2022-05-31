@@ -26,6 +26,9 @@ type check struct {
 	Registry      registry.Registry
 	Docker        *docker.Client
 	ContainerChan chan<- *types.ContainerJSON
+
+	images     []types.ImageSummary
+	containers []types.Container
 }
 
 func (c *check) check(ctx context.Context) error {
@@ -93,59 +96,47 @@ func (c *check) pullImage(ctx context.Context, imageRef string) (string, error) 
 	return latestImage.ID, nil
 }
 
-// refForUntaggedImage takes in an untagged image and looks for the latest version of this image with
-// tags.
-// TODO: handle diferent tags
-// TODO: handle multiple tags per image
-func (c *check) refForUntaggedImage(images []types.ImageSummary, untaggedImage *types.ImageSummary) (string, error) {
-	if len(untaggedImage.RepoDigests) == 0 {
-		return "", errors.New("untagged image RepoDigests is empty, tag is unrecoverable")
-	}
-
-	untaggedImageName := strings.Split(untaggedImage.RepoDigests[0], "@")[0]
-	for _, image := range images {
-		if len(image.RepoTags) == 0 {
-			continue
-		}
-
-		imageName := strings.Split(image.RepoTags[0], ":")[0]
-		if imageName == untaggedImageName {
-			return image.RepoTags[0], nil
-		}
-	}
-
-	return "", errors.New("not found")
-}
-
-// TODO: handle when an image has multiple tags
 // hasLocalUpdate returns true if the given currentImage has a more up-to-date version locally
-func (c *check) hasLocalUpdate(currentImage *types.ImageSummary, images []types.ImageSummary) (bool, error) {
+func (c *check) hasLocalUpdate(container *types.ContainerJSON, currentImage *types.ImageSummary) (bool, error) {
 	if len(currentImage.RepoDigests) == 0 {
 		return false, errors.New("no repo digests on current image")
 	}
 
-	currentImageName := strings.Split(currentImage.RepoDigests[0], "@")[0]
+	if len(currentImage.RepoTags) > 1 {
+		return false, errors.New("image has ambiguous tags")
+	}
 
-	for _, image := range images {
-		if len(image.RepoDigests) == 0 {
+	ref, err := c.refForImage(container, currentImage)
+	if err != nil {
+		return false, err
+	}
+
+	candidates := []types.ImageSummary{}
+	for _, image := range c.images {
+		if len(image.RepoTags) == 0 {
+			continue
+		} else if len(image.RepoTags) > 1 {
+			log.Printf("Check: Image %s has ambiguous tags", image.ID[:20])
 			continue
 		}
 
-		for _, digest := range image.RepoDigests {
-			name := strings.Split(digest, "@")[0]
-			if currentImageName == name && image.Created > currentImage.Created {
-				return true, nil
-			}
+		if image.RepoTags[0] == ref {
+			candidates = append(candidates, image)
 		}
 	}
 
+	for _, candidate := range candidates {
+		if candidate.Created > currentImage.Created {
+			return true, nil
+		}
+	}
 	return false, nil
 }
 
 // hasRemoteUpdate takes in an image reference (name + tag) and gets the latest corresponding digest from the registry.
 // It then checks that remote digest against the local images to see if it already exists. If it does, hasRemoteUpdate
 // returns true, otherwise false
-func (c *check) hasRemoteUpdate(ctx context.Context, localImages []types.ImageSummary, imageRef string) (bool, error) {
+func (c *check) hasRemoteUpdate(ctx context.Context, imageRef string) (bool, error) {
 	ref := strings.Split(imageRef, ":")
 	if len(ref) != 2 {
 		return false, errors.New("malformed image reference")
@@ -166,7 +157,7 @@ func (c *check) hasRemoteUpdate(ctx context.Context, localImages []types.ImageSu
 	}
 
 	// Check if we have a matching digest locally
-	for _, image := range localImages {
+	for _, image := range c.images {
 		for _, repoTag := range image.RepoTags {
 			if repoTag == imageRef {
 				for _, repoDigest := range image.RepoDigests {
@@ -184,7 +175,6 @@ func (c *check) hasRemoteUpdate(ctx context.Context, localImages []types.ImageSu
 func (c *check) queueContainerForUpdate(container *types.ContainerJSON) {
 	// TODO: use a better domain
 	autoUpdate, ok := container.Config.Labels["me.aguado.mirador.automatic-update"]
-	// FIXME: remove this 'true'
 	if ok && autoUpdate == "true" {
 		log.Printf("Check: Queuing container %s for update", container.ID[0:10])
 		c.ContainerChan <- container
@@ -193,18 +183,94 @@ func (c *check) queueContainerForUpdate(container *types.ContainerJSON) {
 	}
 }
 
+// refForImage attempts to figure out the reference (name + tag) of an image.
+// There can be four scenarios:
+//   1. The container running this image has a "tag" label:
+//      We return the user specified tag in the label
+//
+//   2. The image has a single tag:
+//      We return that tag
+//
+//   3. The image does not have any tag (it was updated and untagged):
+//      We get its name and get the latest image with the same name and take its tag
+//      NOTE: an error is returned if multiple images with the same name but different
+//      tags exist (ambiguous tags)
+//
+//   4. The image has multiple tags (it was manually tagged):
+//      We can't determine which tag should be taken into account, an error is returned
+func (c *check) refForImage(container *types.ContainerJSON, image *types.ImageSummary) (string, error) {
+	if tag, ok := container.Config.Labels["me.aguado.mirador.reference"]; ok {
+		return tag, nil
+	}
+
+	switch len(image.RepoTags) {
+	case 0:
+		// The repo digest usually contains the name
+		if len(image.RepoDigests) == 0 {
+			return "", errors.New("image RepoDigests is empty, tag is unrecoverable")
+		} else if len(image.RepoDigests) > 1 {
+			return "", errors.New("image has multiple repo digests, name is ambiguous")
+		}
+
+		name := strings.Split(image.RepoDigests[0], "@")[0]
+
+		// Gather all images with the same name
+		candidates := []types.ImageSummary{}
+		for _, candidate := range c.images {
+			if len(candidate.RepoTags) == 0 {
+				continue
+			} else if len(candidate.RepoTags) > 1 {
+				log.Printf("Check: Image %s has multiple repo tags, name is ambiguous", candidate.ID[:20])
+				continue
+			}
+
+			if strings.Split(candidate.RepoTags[0], ":")[0] == name {
+				candidates = append(candidates, candidate)
+			}
+		}
+
+		if len(candidates) == 0 {
+			return "", errors.New("not found")
+		}
+
+		// Make sure there is only a single tag
+		for i := 0; i < len(candidates); i++ {
+			if candidates[i].RepoTags[0] != candidates[i+1].RepoTags[0] {
+				return "", errors.New("multiple tags for same image name, tags are ambiguous")
+			}
+		}
+
+		// Take the latest image
+		latest := candidates[0]
+		for _, candidate := range candidates {
+			if candidate.Created > latest.Created {
+				latest = candidate
+			}
+		}
+
+		return latest.RepoTags[0], nil
+
+	case 1:
+		return image.RepoTags[0], nil
+
+	default:
+		return "", errors.New("ambiguous tags")
+	}
+}
+
 func (c *check) checkImageUpdates(ctx context.Context) error {
-	images, err := c.Docker.ImageList(ctx, types.ImageListOptions{})
+	var err error
+	c.images, err = c.Docker.ImageList(ctx, types.ImageListOptions{})
 	if err != nil {
 		return fmt.Errorf("failed to list images: %v", err)
 	}
 
-	containers, err := c.Docker.ContainerList(context.Background(), types.ContainerListOptions{})
+	c.containers, err = c.Docker.ContainerList(context.Background(), types.ContainerListOptions{})
 	if err != nil {
 		return fmt.Errorf("failed to list containers: %v", err)
 	}
 
-	for _, cnt := range containers {
+	for _, cnt := range c.containers {
 		container, err := c.Docker.ContainerInspect(ctx, cnt.ID)
 		if err != nil {
 			log.Printf("Check: Failed to inspect container %s: %v", cnt.ID, err)
@@ -212,26 +278,20 @@ func (c *check) checkImageUpdates(ctx context.Context) error {
 		}
 
 		var image *types.ImageSummary
-		for _, i := range images {
+		for _, i := range c.images {
 			if i.ID == container.Image {
 				image = &i
 				break
 			}
 		}
 
-		imageRef := ""
-		if len(image.RepoTags) > 0 {
-			// TODO: handle multiple tags
-			imageRef = image.RepoTags[0]
-		} else {
-			// Image is untagged, so we have to look for a tagged image with the same name
-			imageRef, err = c.refForUntaggedImage(images, image)
-			if err != nil {
-				log.Printf("Check: Failed to get tag for untagged image %s: %v", container.Config.Image, err)
-			}
+		imageRef, err := c.refForImage(&container, image)
+		if err != nil {
+			log.Printf("Check: Failed to get reference of image %s: %v", image.ID[:20], err)
+			continue
 		}
 
-		hasRemoteUpdate, err := c.hasRemoteUpdate(ctx, images, imageRef)
+		hasRemoteUpdate, err := c.hasRemoteUpdate(ctx, imageRef)
 		if err != nil {
 			log.Printf("Check: Failed to search for remote update for %s: %v", imageRef, err)
 			continue
@@ -242,9 +302,15 @@ func (c *check) checkImageUpdates(ctx context.Context) error {
 				log.Printf("Check: Failed to pull image: %v", err)
 				continue
 			}
+			// Refresh images
+			c.images, err = c.Docker.ImageList(ctx, types.ImageListOptions{})
+			if err != nil {
+				return fmt.Errorf("failed to list images: %v", err)
+			}
+
 			c.queueContainerForUpdate(&container)
 		} else {
-			hasLocalUpdate, err := c.hasLocalUpdate(image, images)
+			hasLocalUpdate, err := c.hasLocalUpdate(&container, image)
 			if err != nil {
 				log.Printf("Check: Failed to check for local update: %v", err)
 				continue

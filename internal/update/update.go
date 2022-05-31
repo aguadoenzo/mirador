@@ -113,7 +113,7 @@ func (u *update) latestVersionOfImage(ctx context.Context, oldImageID string) (*
 	}
 
 	if len(oldImage.RepoDigests) == 0 {
-		return nil, errors.New("untagged image RepoDigests is empty, tag is unrecoverable")
+		return nil, errors.New("untagged image RepoDigests is empty, name is unrecoverable")
 	}
 	imageName := strings.Split(oldImage.RepoDigests[0], "@")[0]
 
