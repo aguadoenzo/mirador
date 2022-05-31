@@ -1,4 +1,4 @@
-module watchtower-exporter
+module  github.com/aguadoenzo/mirador
 
 go 1.17
 

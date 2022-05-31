@@ -6,9 +6,9 @@ import (
 	"os"
 	"os/signal"
 
-	"watchtower-exporter/internal/check"
-	"watchtower-exporter/internal/registry"
-	"watchtower-exporter/internal/update"
+	"github.com/aguadoenzo/mirador/internal/check"
+	"github.com/aguadoenzo/mirador/internal/registry"
+	"github.com/aguadoenzo/mirador/internal/update"
 
 	"github.com/docker/docker/api/types"
 	"github.com/docker/docker/client"

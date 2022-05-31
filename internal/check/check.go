@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	"watchtower-exporter/internal/registry"
+	"github.com/aguadoenzo/mirador/internal/registry"
 
 	"github.com/docker/docker/api/types"
 	"github.com/docker/docker/api/types/filters"
